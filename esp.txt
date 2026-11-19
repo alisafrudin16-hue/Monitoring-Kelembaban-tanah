@@ -1,0 +1,62 @@
+#include <WiFi.h>
+#include "ThingSpeak.h"
+
+// Konfigurasi WiFi kos pitra rahma
+const char* ssid = "LOve livez";        
+const char* password = "sediodawuh"; 
+
+WiFiClient client;
+
+// Disesuaikan dengan Channel ID dan API Key yang benar dari SOP
+unsigned long myChannelNumber = 3570142;
+const char* myWriteAPIKey = "LYY3WDFFTV1UUZDB";
+
+const int sensorPin = 34; // Pin AO modul sensor terhubung ke GPIO 34 ESP32
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Menghubungkan ke Hotspot vivo Y21");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nTerhubung ke WiFi!");
+  
+  ThingSpeak.begin(client);  
+}
+
+void loop() {
+  // Cek jika WiFi terputus
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi terputus, menyambungkan ulang...");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("\nTerhubung kembali ke WiFi!");
+  }
+
+  // Baca nilai dari sensor kelembapan tanah
+  int sensorValue = analogRead(sensorPin);
+  
+  // Masukkan nilai ke Field 1 ThingSpeak
+  ThingSpeak.setField(1, sensorValue);
+
+  // Kirim data ke channel ThingSpeak
+  int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+
+  if (x == 200) {
+    Serial.println("Berhasil kirim data ke ThingSpeak! Nilai: " + String(sensorValue));
+  } else {
+    Serial.println("Gagal kirim data, HTTP error code " + String(x));
+  }
+
+  // Jeda 30 detik sebelum pengiriman berikutnya
+  delay(30000); 
+}

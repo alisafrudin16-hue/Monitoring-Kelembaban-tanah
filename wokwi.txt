@@ -1,0 +1,157 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic = "uas_iot/kelembapan/kelompok_saya";
+
+const int SOIL_PIN = 34;
+
+// =============================================================
+// UBAH ANGKA INI (1 sampai 6) UNTUK MENGUJI MASING-MASING SKENARIO
+#define CURRENT_SCENARIO 6 
+// =============================================================
+
+const int TOTAL_MESSAGES = 100; // Minimal 100 pesan per skenario
+const unsigned long TIMEOUT_MS = 5000; // Timeout 5 detik
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+unsigned long sendTime = 0;
+bool waitingAck = false;
+int currentSeq = 0;
+int successCount = 0;
+
+String createPayload(int seq, int scenario) {
+  int rawAnalog = analogRead(SOIL_PIN);
+  int moisturePercent = map(rawAnalog, 0, 4095, 0, 100);
+  
+  StaticJsonDocument<600> doc;
+  doc["seq"] = seq;
+  doc["moisture"] = moisturePercent;
+
+  // S2, S4, S6 membutuhkan payload ± 500 byte
+  if (scenario == 2 || scenario == 4 || scenario == 6) {
+    String padding = "";
+    for (int i = 0; i < 46; i++) {
+      padding += "1234567890";
+    }
+    doc["pad"] = padding;
+  }
+
+  String output;
+  serializeJson(doc, output);
+  return output;
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  unsigned long recvTime = millis();
+  unsigned long rtt = recvTime - sendTime;
+  
+  StaticJsonDocument<600> doc;
+  deserializeJson(doc, payload, length);
+  int receivedSeq = doc["seq"];
+
+  if (receivedSeq == currentSeq) {
+    successCount++;
+    waitingAck = false;
+    Serial.printf("S%d,%d,MQTT,%u,%lu,SUCCESS\n", CURRENT_SCENARIO, receivedSeq, length, rtt);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(SOIL_PIN, INPUT);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n[WiFi] Connected!");
+
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(600);
+
+  Serial.println("Scenario,Seq,Protocol,PayloadBytes,RTT_ms,Status");
+}
+
+void runHttpScenario(int scenario) {
+  HTTPClient http;
+  http.begin("http://httpbin.org/post"); 
+  http.addHeader("Content-Type", "application/json");
+
+  for (int i = 1; i <= TOTAL_MESSAGES; i++) {
+    String payload = createPayload(i, scenario);
+    unsigned long start = millis();
+    
+    int httpResponseCode = http.POST(payload);
+    unsigned long rtt = millis() - start;
+
+    if (httpResponseCode > 0) {
+      successCount++;
+      Serial.printf("S%d,%d,HTTP,%d,%lu,SUCCESS\n", scenario, i, payload.length(), rtt);
+    } else {
+      Serial.printf("S%d,%d,HTTP,%d,0,LOST\n", scenario, i, payload.length());
+    }
+    delay(2000); // Jeda wajib 2 detik
+  }
+  http.end();
+}
+
+void runMqttScenario(int scenario, int qos) {
+  while (!mqttClient.connected()) {
+    String clientId = "ESP32-Wokwi-" + String(random(0xffff));
+    if (mqttClient.connect(clientId.c_str())) {
+      mqttClient.subscribe(mqtt_topic, qos);
+    } else {
+      delay(1000);
+    }
+  }
+
+  for (int i = 1; i <= TOTAL_MESSAGES; i++) {
+    mqttClient.loop();
+    currentSeq = i;
+    String payload = createPayload(i, scenario);
+    
+    sendTime = millis();
+    waitingAck = true;
+    
+    mqttClient.publish(mqtt_topic, (const uint8_t*)payload.c_str(), payload.length(), false);
+
+    unsigned long waitStart = millis();
+    while (waitingAck && (millis() - waitStart < TIMEOUT_MS)) {
+      mqttClient.loop();
+      delay(10);
+    }
+
+    if (waitingAck) {
+      Serial.printf("S%d,%d,MQTT,%d,0,LOST\n", scenario, i, payload.length());
+      waitingAck = false;
+    }
+
+    delay(2000); // Jeda wajib 2 detik
+  }
+}
+
+void loop() {
+  if (CURRENT_SCENARIO == 1 || CURRENT_SCENARIO == 2) {
+    runHttpScenario(CURRENT_SCENARIO);
+  } else if (CURRENT_SCENARIO == 3 || CURRENT_SCENARIO == 4) {
+    runMqttScenario(CURRENT_SCENARIO, 0); // QoS 0
+  } else if (CURRENT_SCENARIO == 5 || CURRENT_SCENARIO == 6) {
+    runMqttScenario(CURRENT_SCENARIO, 1); // QoS 1
+  }
+
+  float pdr = ((float)successCount / TOTAL_MESSAGES) * 100.0;
+  Serial.printf("# SELESAI S%d | PDR: %.2f%%\n", CURRENT_SCENARIO, pdr);
+  
+  while (true) { delay(1000); }
+}
